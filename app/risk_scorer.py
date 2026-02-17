@@ -19,13 +19,14 @@ from .data_store import DataStore
 @dataclass
 class ScoringWeights:
     """Configurable weights for risk factors."""
-    dormancy: float = 0.35       # Weight for dormancy factor
-    amount_anomaly: float = 0.30  # Weight for amount deviation
-    type_anomaly: float = 0.20    # Weight for transaction type anomaly
-    velocity: float = 0.15        # Weight for velocity spike
+    dormancy: float = 0.30        # Weight for dormancy factor
+    amount_anomaly: float = 0.25  # Weight for amount deviation
+    type_anomaly: float = 0.18    # Weight for transaction type anomaly
+    velocity: float = 0.12        # Weight for velocity spike
+    location_anomaly: float = 0.15  # Weight for geographic anomaly
     
     def __post_init__(self):
-        total = self.dormancy + self.amount_anomaly + self.type_anomaly + self.velocity
+        total = self.dormancy + self.amount_anomaly + self.type_anomaly + self.velocity + self.location_anomaly
         if abs(total - 1.0) > 0.01:
             raise ValueError(f"Weights must sum to 1.0, got {total}")
 
@@ -126,12 +127,19 @@ class RiskScorer:
         )
         factors.append(velocity_factor)
         
+        # 5. Location Anomaly Factor
+        location_score, location_factor = self._calculate_location_anomaly(
+            transaction.location, profile
+        )
+        factors.append(location_factor)
+        
         # Calculate weighted final score
         final_score = (
             dormancy_score * self.weights.dormancy +
             amount_score * self.weights.amount_anomaly +
             type_score * self.weights.type_anomaly +
-            velocity_score * self.weights.velocity
+            velocity_score * self.weights.velocity +
+            location_score * self.weights.location_anomaly
         )
         final_score = min(100, max(0, round(final_score)))
         
@@ -352,6 +360,103 @@ class RiskScorer:
         return score, RiskFactor(
             factor_name="velocity",
             score_contribution=round(score * self.weights.velocity, 2),
+            description=desc
+        )
+    
+    # Known international/high-risk locations (outside Southeast Asia domestic region)
+    INTERNATIONAL_LOCATIONS = {
+        "London", "New York", "Dubai", "Tokyo", "Sydney",
+        "Moscow", "Lagos", "Sao Paulo", "Paris", "Berlin",
+        "Toronto", "Mumbai", "Beijing", "Shanghai", "Seoul"
+    }
+    
+    # Southeast Asia domestic region
+    DOMESTIC_LOCATIONS = {
+        "Singapore", "Jakarta", "Bangkok", "Kuala Lumpur", "Manila",
+        "Ho Chi Minh City", "Hanoi", "Bali", "Phuket", "Penang",
+        "Cebu", "Chiang Mai", "Yangon", "Phnom Penh", "Brunei"
+    }
+    
+    def _calculate_location_anomaly(
+        self, location: str | None, profile: AccountProfile
+    ) -> tuple[float, RiskFactor]:
+        """
+        Calculate location anomaly score (0-100).
+        
+        Factors considered:
+        - Is the location in the account's common locations?
+        - Is it an international location when account typically transacts domestically?
+        - Is this a completely new location for the account?
+        """
+        if not location:
+            # No location provided - slight concern but not critical
+            return 10.0, RiskFactor(
+                factor_name="location_anomaly",
+                score_contribution=round(10.0 * self.weights.location_anomaly, 2),
+                description="Transaction location not provided"
+            )
+        
+        common_locations = profile.common_locations
+        
+        if profile.total_transactions == 0:
+            # No history - check if international location
+            if location in self.INTERNATIONAL_LOCATIONS:
+                score = 50.0
+                desc = f"International location '{location}' with no account history"
+            else:
+                score = 15.0
+                desc = f"Location '{location}' with no baseline for comparison"
+            return score, RiskFactor(
+                factor_name="location_anomaly",
+                score_contribution=round(score * self.weights.location_anomaly, 2),
+                description=desc
+            )
+        
+        # Check if location is in common locations
+        is_common = location in common_locations
+        is_international = location in self.INTERNATIONAL_LOCATIONS
+        is_domestic = location in self.DOMESTIC_LOCATIONS
+        
+        # Account typically transacts domestically?
+        domestic_count = sum(1 for loc in common_locations if loc in self.DOMESTIC_LOCATIONS)
+        typically_domestic = domestic_count > len(common_locations) / 2
+        
+        if is_common:
+            # Location is familiar to this account
+            score = 0.0
+            desc = f"Transaction from common location '{location}'"
+        elif is_international and typically_domestic:
+            # International location for typically domestic account - high risk
+            if profile.is_dormant:
+                score = 90.0
+                desc = f"International location '{location}' on dormant account that typically transacts domestically"
+            else:
+                score = 65.0
+                desc = f"International location '{location}' - account typically transacts in Southeast Asia"
+        elif is_international:
+            # International but account has some international history
+            score = 40.0
+            desc = f"International location '{location}' - not in account's common locations"
+        elif is_domestic and not is_common:
+            # New domestic location - moderate concern
+            if profile.is_dormant:
+                score = 35.0
+                desc = f"New domestic location '{location}' on dormant account"
+            else:
+                score = 15.0
+                desc = f"Transaction from new domestic location '{location}'"
+        else:
+            # Unknown location not in either list
+            if profile.is_dormant:
+                score = 50.0
+                desc = f"Unknown location '{location}' on dormant account"
+            else:
+                score = 25.0
+                desc = f"Transaction from unfamiliar location '{location}'"
+        
+        return score, RiskFactor(
+            factor_name="location_anomaly",
+            score_contribution=round(score * self.weights.location_anomaly, 2),
             description=desc
         )
     

@@ -337,13 +337,13 @@ class TestRiskScorer:
         
         # Scorer with high dormancy weight
         high_dormancy_weights = ScoringWeights(
-            dormancy=0.70, amount_anomaly=0.15, type_anomaly=0.10, velocity=0.05
+            dormancy=0.60, amount_anomaly=0.15, type_anomaly=0.10, velocity=0.05, location_anomaly=0.10
         )
         scorer_high = RiskScorer(data_store, weights=high_dormancy_weights, reference_date=reference_date)
         
         # Scorer with low dormancy weight
         low_dormancy_weights = ScoringWeights(
-            dormancy=0.10, amount_anomaly=0.50, type_anomaly=0.30, velocity=0.10
+            dormancy=0.10, amount_anomaly=0.40, type_anomaly=0.25, velocity=0.10, location_anomaly=0.15
         )
         scorer_low = RiskScorer(data_store, weights=low_dormancy_weights, reference_date=reference_date)
         
@@ -381,6 +381,85 @@ class TestRiskScorer:
         assert "amount_anomaly" in factor_names
         assert "type_anomaly" in factor_names
         assert "velocity" in factor_names
+        assert "location_anomaly" in factor_names
+    
+    def test_location_anomaly_common_location(self, data_store, sample_transactions, reference_date):
+        """Test that transactions from common locations score low on location anomaly."""
+        data_store.add_transactions_bulk(sample_transactions)
+        profiler = AccountProfiler(data_store, reference_date=reference_date)
+        profiler.build_all_profiles()
+        scorer = RiskScorer(data_store, reference_date=reference_date)
+        
+        # ACC-ACTIVE-001 has all transactions from Singapore
+        transaction = TransactionRequest(
+            account_id="ACC-ACTIVE-001",
+            amount=50.0,
+            transaction_type=TransactionType.ONLINE_PURCHASE,
+            timestamp=reference_date,
+            location="Singapore"  # Common location for this account
+        )
+        
+        assessment = scorer.calculate_risk(transaction)
+        
+        location_factor = next(f for f in assessment.factors if f.factor_name == "location_anomaly")
+        assert location_factor.score_contribution == 0.0
+        assert "common location" in location_factor.description.lower()
+    
+    def test_location_anomaly_international(self, data_store, sample_transactions, reference_date):
+        """Test that international locations increase risk for domestic accounts."""
+        data_store.add_transactions_bulk(sample_transactions)
+        profiler = AccountProfiler(data_store, reference_date=reference_date)
+        profiler.build_all_profiles()
+        scorer = RiskScorer(data_store, reference_date=reference_date)
+        
+        # Transaction from common domestic location
+        domestic_txn = TransactionRequest(
+            account_id="ACC-ACTIVE-001",
+            amount=50.0,
+            transaction_type=TransactionType.ONLINE_PURCHASE,
+            timestamp=reference_date,
+            location="Singapore"
+        )
+        
+        # Same transaction but from international location
+        international_txn = TransactionRequest(
+            account_id="ACC-ACTIVE-001",
+            amount=50.0,
+            transaction_type=TransactionType.ONLINE_PURCHASE,
+            timestamp=reference_date,
+            location="London"  # International location
+        )
+        
+        domestic_assessment = scorer.calculate_risk(domestic_txn)
+        international_assessment = scorer.calculate_risk(international_txn)
+        
+        assert international_assessment.risk_score > domestic_assessment.risk_score
+        
+        intl_location_factor = next(f for f in international_assessment.factors if f.factor_name == "location_anomaly")
+        assert intl_location_factor.score_contribution > 0
+    
+    def test_location_anomaly_dormant_international(self, data_store, sample_transactions, reference_date):
+        """Test that international location on dormant account scores very high."""
+        data_store.add_transactions_bulk(sample_transactions)
+        profiler = AccountProfiler(data_store, reference_date=reference_date)
+        profiler.build_all_profiles()
+        scorer = RiskScorer(data_store, reference_date=reference_date)
+        
+        # ACC-DORMANT-001 typically transacts from Jakarta (domestic)
+        transaction = TransactionRequest(
+            account_id="ACC-DORMANT-001",
+            amount=100.0,
+            transaction_type=TransactionType.ATM_WITHDRAWAL,
+            timestamp=reference_date,
+            location="Moscow"  # International location on dormant account
+        )
+        
+        assessment = scorer.calculate_risk(transaction)
+        
+        location_factor = next(f for f in assessment.factors if f.factor_name == "location_anomaly")
+        # Should have high contribution due to international + dormant combination
+        assert location_factor.score_contribution >= 10  # 90 * 0.15 = 13.5
+        assert "international" in location_factor.description.lower() or "dormant" in location_factor.description.lower()
 
 
 class TestIntegration:
