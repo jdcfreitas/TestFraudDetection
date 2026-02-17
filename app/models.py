@@ -50,6 +50,7 @@ class RiskAssessment(BaseModel):
     account_id: str
     risk_score: int = Field(..., ge=0, le=100)
     risk_level: str  # LOW, MEDIUM, HIGH, CRITICAL
+    account_status: str  # ACTIVE, DORMANT, REACTIVATING, NEW
     explanation: str
     factors: list[RiskFactor]
     is_dormant_account: bool
@@ -79,6 +80,7 @@ class AccountStatus(str, Enum):
     """Account activity status."""
     ACTIVE = "active"
     DORMANT = "dormant"
+    REACTIVATING = "reactivating"  # Dormant account with recent transaction (high-risk)
     NEW = "new"
 
 

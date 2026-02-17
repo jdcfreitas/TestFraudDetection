@@ -6,6 +6,7 @@ from typing import Optional
 
 from .models import (
     AccountProfile, 
+    AccountStatus,
     Transaction, 
     TransactionRequest,
     RiskAssessment, 
@@ -86,6 +87,7 @@ class RiskScorer:
                 account_id=transaction.account_id,
                 risk_score=85,
                 risk_level="CRITICAL",
+                account_status=AccountStatus.NEW.value,
                 explanation="Unknown account with no transaction history",
                 factors=[
                     RiskFactor(
@@ -144,16 +146,36 @@ class RiskScorer:
         # Generate recommendation
         recommendation = self._generate_recommendation(final_score, risk_level)
         
+        # Determine account status
+        account_status = self._determine_account_status(profile)
+        
         return RiskAssessment(
             account_id=transaction.account_id,
             risk_score=final_score,
             risk_level=risk_level,
+            account_status=account_status,
             explanation=explanation,
             factors=factors,
             is_dormant_account=profile.is_dormant,
             days_dormant=profile.days_since_last_transaction if profile.is_dormant else None,
             recommendation=recommendation
         )
+    
+    def _determine_account_status(self, profile: AccountProfile) -> str:
+        """
+        Determine the account status based on its profile.
+        
+        Returns:
+            Account status: ACTIVE, DORMANT, REACTIVATING, or NEW
+        """
+        if profile.total_transactions == 0:
+            return AccountStatus.NEW.value
+        
+        if profile.is_dormant:
+            # Account is dormant - the current transaction is a reactivation attempt
+            return AccountStatus.REACTIVATING.value
+        
+        return AccountStatus.ACTIVE.value
     
     def _calculate_dormancy_score(
         self, profile: AccountProfile

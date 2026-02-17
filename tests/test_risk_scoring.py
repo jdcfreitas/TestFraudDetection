@@ -8,7 +8,7 @@ import json
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app.models import Transaction, TransactionRequest, TransactionType, AccountProfile
+from app.models import Transaction, TransactionRequest, TransactionType, AccountProfile, AccountStatus
 from app.data_store import DataStore
 from app.account_profiler import AccountProfiler
 from app.risk_scorer import RiskScorer, ScoringWeights
@@ -289,7 +289,46 @@ class TestRiskScorer:
         
         assert assessment.risk_score >= 75
         assert assessment.risk_level == "CRITICAL"
+        assert assessment.account_status == AccountStatus.NEW.value
     
+    def test_account_status_active(self, data_store, sample_transactions, reference_date):
+        """Test that active accounts have ACTIVE status."""
+        data_store.add_transactions_bulk(sample_transactions)
+        profiler = AccountProfiler(data_store, reference_date=reference_date)
+        profiler.build_all_profiles()
+        scorer = RiskScorer(data_store, reference_date=reference_date)
+        
+        transaction = TransactionRequest(
+            account_id="ACC-ACTIVE-001",
+            amount=55.0,
+            transaction_type=TransactionType.ONLINE_PURCHASE,
+            timestamp=reference_date
+        )
+        
+        assessment = scorer.calculate_risk(transaction)
+        
+        assert assessment.account_status == AccountStatus.ACTIVE.value
+    
+    def test_account_status_reactivating(self, data_store, sample_transactions, reference_date):
+        """Test that dormant accounts get REACTIVATING status when transacting."""
+        data_store.add_transactions_bulk(sample_transactions)
+        profiler = AccountProfiler(data_store, reference_date=reference_date)
+        profiler.build_all_profiles()
+        scorer = RiskScorer(data_store, reference_date=reference_date)
+        
+        # Transaction on a dormant account
+        transaction = TransactionRequest(
+            account_id="ACC-DORMANT-001",
+            amount=100.0,
+            transaction_type=TransactionType.ATM_WITHDRAWAL,
+            timestamp=reference_date
+        )
+        
+        assessment = scorer.calculate_risk(transaction)
+        
+        assert assessment.account_status == AccountStatus.REACTIVATING.value
+        assert assessment.is_dormant_account
+
     def test_custom_weights(self, data_store, sample_transactions, reference_date):
         """Test that custom weights affect scoring."""
         data_store.add_transactions_bulk(sample_transactions)
