@@ -331,23 +331,25 @@ async def ingest_transactions(transactions: list[Transaction]):
 
 @app.put("/api/v1/config/weights", tags=["Configuration"])
 async def update_scoring_weights(
-    dormancy: float = Query(0.35, ge=0, le=1),
-    amount_anomaly: float = Query(0.30, ge=0, le=1),
-    type_anomaly: float = Query(0.20, ge=0, le=1),
-    velocity: float = Query(0.15, ge=0, le=1)
+    dormancy: float = Query(0.30, ge=0, le=1),
+    amount_anomaly: float = Query(0.25, ge=0, le=1),
+    type_anomaly: float = Query(0.18, ge=0, le=1),
+    velocity: float = Query(0.12, ge=0, le=1),
+    location_anomaly: float = Query(0.15, ge=0, le=1)
 ):
     """
     Update the risk scoring weights.
     
     Weights must sum to 1.0. Default weights:
-    - dormancy: 0.35
-    - amount_anomaly: 0.30
-    - type_anomaly: 0.20
-    - velocity: 0.15
+    - dormancy: 0.30
+    - amount_anomaly: 0.25
+    - type_anomaly: 0.18
+    - velocity: 0.12
+    - location_anomaly: 0.15
     """
     global scorer
     
-    total = dormancy + amount_anomaly + type_anomaly + velocity
+    total = dormancy + amount_anomaly + type_anomaly + velocity + location_anomaly
     if abs(total - 1.0) > 0.01:
         raise HTTPException(
             status_code=400, 
@@ -358,7 +360,8 @@ async def update_scoring_weights(
         dormancy=dormancy,
         amount_anomaly=amount_anomaly,
         type_anomaly=type_anomaly,
-        velocity=velocity
+        velocity=velocity,
+        location_anomaly=location_anomaly
     )
     
     scorer = RiskScorer(data_store, weights=new_weights)
