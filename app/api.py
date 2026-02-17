@@ -210,13 +210,30 @@ async def assess_batch_transactions(batch: BatchTransactionRequest):
 @app.get("/api/v1/accounts/{account_id}/profile", response_model=AccountProfile, tags=["Accounts"])
 async def get_account_profile(account_id: str):
     """
-    Get the behavioral profile for an account.
+    Get the behavioral profile for a specific account.
     
-    Returns the account's transaction history analysis including:
-    - Dormancy status
-    - Average/median transaction amounts
-    - Transaction type distribution
-    - Common locations
+    Returns the account's transaction history analysis and behavioral baseline,
+    useful for understanding normal patterns before assessing risk.
+    
+    **Profile includes:**
+    - **Activity Status:** `is_dormant`, `days_since_last_transaction`, `last_transaction_date`
+    - **Amount Statistics:** `average_amount`, `median_amount`, `min_amount`, `max_amount`, `std_dev_amount`
+    - **Transaction Patterns:** `typical_transaction_types`, `transaction_type_distribution`
+    - **Location Data:** `common_locations` (top 5 most frequent)
+    - **History:** `total_transactions`, `first_transaction_date`
+    
+    **Example Response:**
+    ```json
+    {
+      "account_id": "ACC-12345678",
+      "is_dormant": true,
+      "days_since_last_transaction": 245,
+      "last_transaction_date": "2025-06-17T14:30:00",
+      "average_amount": 125.50,
+      "typical_transaction_types": ["online_purchase", "atm_withdrawal"],
+      ...
+    }
+    ```
     """
     profile = data_store.get_profile(account_id)
     if profile is None:
