@@ -1,0 +1,76 @@
+# Fraud Detection Service Configuration
+# =====================================
+# This file contains all configurable thresholds and weights for the risk scoring engine.
+
+# Dormancy Settings
+# -----------------
+dormancy:
+  # Number of days of inactivity before an account is considered dormant
+  threshold_days: 180
+
+# Velocity Detection Settings
+# ---------------------------
+velocity:
+  # Time window (in minutes) to check for rapid-fire transactions
+  window_minutes: 60
+  # Number of transactions within the window that triggers a velocity concern
+  threshold_count: 3
+
+# Risk Scoring Weights
+# --------------------
+# These weights determine how much each factor contributes to the final risk score.
+# All weights must sum to 1.0 (100%)
+risk_weights:
+  dormancy: 0.30           # Weight for dormancy factor (30%)
+  amount_anomaly: 0.25     # Weight for amount deviation (25%)
+  type_anomaly: 0.18       # Weight for transaction type anomaly (18%)
+  velocity: 0.12           # Weight for velocity spike (12%)
+  location_anomaly: 0.15   # Weight for geographic anomaly (15%)
+
+# Risk Level Thresholds
+# ---------------------
+# Score ranges that determine the risk level classification
+risk_levels:
+  low_max: 25        # 0-25: LOW risk
+  medium_max: 50     # 26-50: MEDIUM risk
+  high_max: 75       # 51-75: HIGH risk
+  # 76-100: CRITICAL risk
+
+# Location Settings
+# -----------------
+locations:
+  # Southeast Asia domestic region (CedarBank's primary market)
+  domestic:
+    - Singapore
+    - Jakarta
+    - Bangkok
+    - Kuala Lumpur
+    - Manila
+    - Ho Chi Minh City
+    - Hanoi
+    - Bali
+    - Phuket
+    - Penang
+    - Cebu
+    - Chiang Mai
+    - Yangon
+    - Phnom Penh
+    - Brunei
+  
+  # International locations (higher risk for typically domestic accounts)
+  international:
+    - London
+    - New York
+    - Dubai
+    - Tokyo
+    - Sydney
+    - Moscow
+    - Lagos
+    - Sao Paulo
+    - Paris
+    - Berlin
+    - Toronto
+    - Mumbai
+    - Beijing
+    - Shanghai
+    - Seoul

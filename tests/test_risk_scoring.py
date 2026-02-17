@@ -660,6 +660,125 @@ class TestEdgeCases:
         assert assessment.risk_score <= 100
 
 
+class TestConfiguration:
+    """Tests for configuration loading and custom config values."""
+    
+    def test_custom_dormancy_threshold(self, data_store, reference_date):
+        """Test that dormancy threshold can be configured."""
+        from app.config import FraudDetectionConfig, DormancyConfig
+        
+        # Create config with 90-day dormancy threshold instead of 180
+        custom_config = FraudDetectionConfig()
+        custom_config.dormancy = DormancyConfig(threshold_days=90)
+        
+        # Create account with 100 days since last transaction
+        # (dormant with 90-day threshold, active with 180-day threshold)
+        transactions = [
+            Transaction(
+                transaction_id="TXN-CUSTOM-1",
+                account_id="ACC-CUSTOM-001",
+                amount=50.0,
+                transaction_type=TransactionType.ATM_WITHDRAWAL,
+                timestamp=reference_date - timedelta(days=100),
+                location="Singapore"
+            )
+        ]
+        data_store.add_transactions_bulk(transactions)
+        
+        # With custom 90-day threshold
+        profiler_custom = AccountProfiler(data_store, reference_date=reference_date, config=custom_config)
+        profile_custom = profiler_custom.build_profile("ACC-CUSTOM-001")
+        assert profile_custom.is_dormant  # Should be dormant (100 > 90)
+        
+        # With default 180-day threshold
+        default_config = FraudDetectionConfig()
+        profiler_default = AccountProfiler(data_store, reference_date=reference_date, config=default_config)
+        profile_default = profiler_default.build_profile("ACC-CUSTOM-001")
+        assert not profile_default.is_dormant  # Should NOT be dormant (100 < 180)
+    
+    def test_custom_risk_weights(self, data_store, reference_date):
+        """Test that risk weights can be configured via config object."""
+        from app.config import FraudDetectionConfig, RiskWeightsConfig
+        
+        # Create config with high dormancy weight
+        custom_config = FraudDetectionConfig()
+        custom_config.risk_weights = RiskWeightsConfig(
+            dormancy=0.60,
+            amount_anomaly=0.15,
+            type_anomaly=0.10,
+            velocity=0.05,
+            location_anomaly=0.10
+        )
+        
+        transactions = [
+            Transaction(
+                transaction_id="TXN-WEIGHT-1",
+                account_id="ACC-WEIGHT-001",
+                amount=50.0,
+                transaction_type=TransactionType.ATM_WITHDRAWAL,
+                timestamp=reference_date - timedelta(days=200),
+                location="Singapore"
+            )
+        ]
+        data_store.add_transactions_bulk(transactions)
+        
+        profiler = AccountProfiler(data_store, reference_date=reference_date, config=custom_config)
+        profiler.build_all_profiles()
+        
+        scorer = RiskScorer(data_store, reference_date=reference_date, config=custom_config)
+        
+        transaction = TransactionRequest(
+            account_id="ACC-WEIGHT-001",
+            amount=50.0,
+            transaction_type=TransactionType.ATM_WITHDRAWAL,
+            timestamp=reference_date,
+            location="Singapore"
+        )
+        
+        assessment = scorer.calculate_risk(transaction)
+        
+        # Dormancy should contribute more with 60% weight
+        dormancy_factor = next(f for f in assessment.factors if f.factor_name == "dormancy")
+        # 200 days dormant should score ~47 raw, with 60% weight = ~28 contribution
+        assert dormancy_factor.score_contribution > 20
+    
+    def test_config_from_yaml(self, tmp_path):
+        """Test loading configuration from YAML file."""
+        from app.config import FraudDetectionConfig
+        
+        config_content = """
+dormancy:
+  threshold_days: 120
+
+velocity:
+  window_minutes: 30
+  threshold_count: 5
+
+risk_weights:
+  dormancy: 0.40
+  amount_anomaly: 0.20
+  type_anomaly: 0.15
+  velocity: 0.10
+  location_anomaly: 0.15
+
+risk_levels:
+  low_max: 20
+  medium_max: 45
+  high_max: 70
+"""
+        config_file = tmp_path / "test_config.yaml"
+        config_file.write_text(config_content)
+        
+        config = FraudDetectionConfig.from_yaml(config_file)
+        
+        assert config.dormancy.threshold_days == 120
+        assert config.velocity.window_minutes == 30
+        assert config.velocity.threshold_count == 5
+        assert config.risk_weights.dormancy == 0.40
+        assert config.risk_levels.low_max == 20
+        assert config.risk_levels.medium_max == 45
+
+
 class TestIntegration:
     """Integration tests using the generated test data."""
     

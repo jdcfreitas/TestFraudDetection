@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from collections import Counter
 
+from .config import get_config, FraudDetectionConfig
 from .models import Transaction, AccountProfile, TransactionType
 from .data_store import DataStore
 
@@ -14,16 +15,19 @@ class AccountProfiler:
     Builds behavioral profiles for accounts based on transaction history.
     
     A profile includes:
-    - Dormancy status (no transactions in last 180 days)
+    - Dormancy status (configurable threshold, default 180 days)
     - Average/median/std dev of transaction amounts
     - Distribution of transaction types
     - Common locations
     - Last transaction date
     """
     
-    DORMANCY_THRESHOLD_DAYS = 180  # CedarBank's dormancy threshold
-    
-    def __init__(self, data_store: DataStore, reference_date: Optional[datetime] = None):
+    def __init__(
+        self, 
+        data_store: DataStore, 
+        reference_date: Optional[datetime] = None,
+        config: Optional[FraudDetectionConfig] = None
+    ):
         """
         Initialize the profiler.
         
@@ -31,9 +35,12 @@ class AccountProfiler:
             data_store: The data store containing transaction history
             reference_date: The date to use as "now" for dormancy calculations.
                           If None, uses current datetime.
+            config: Custom configuration (uses global config if not provided)
         """
+        self.config = config or get_config()
         self.data_store = data_store
         self.reference_date = reference_date or datetime.now()
+        self.dormancy_threshold_days = self.config.dormancy.threshold_days
     
     def build_profile(self, account_id: str) -> AccountProfile:
         """
@@ -97,7 +104,7 @@ class AccountProfiler:
         last_transaction = transactions[-1]
         last_txn_date = last_transaction.timestamp
         days_since_last = (self.reference_date - last_txn_date).days
-        is_dormant = days_since_last >= self.DORMANCY_THRESHOLD_DAYS
+        is_dormant = days_since_last >= self.dormancy_threshold_days
         
         return AccountProfile(
             account_id=account_id,

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
+from .config import get_config, FraudDetectionConfig
 from .models import (
     AccountProfile, 
     AccountStatus,
@@ -29,6 +30,17 @@ class ScoringWeights:
         total = self.dormancy + self.amount_anomaly + self.type_anomaly + self.velocity + self.location_anomaly
         if abs(total - 1.0) > 0.01:
             raise ValueError(f"Weights must sum to 1.0, got {total}")
+    
+    @classmethod
+    def from_config(cls, config: FraudDetectionConfig) -> "ScoringWeights":
+        """Create ScoringWeights from configuration."""
+        return cls(
+            dormancy=config.risk_weights.dormancy,
+            amount_anomaly=config.risk_weights.amount_anomaly,
+            type_anomaly=config.risk_weights.type_anomaly,
+            velocity=config.risk_weights.velocity,
+            location_anomaly=config.risk_weights.location_anomaly
+        )
 
 
 class RiskScorer:
@@ -36,39 +48,50 @@ class RiskScorer:
     Calculates risk scores for transactions based on account behavior.
     
     Risk Score Components:
-    1. Dormancy Factor (35%): Higher score for longer dormancy periods
-    2. Amount Anomaly (30%): Higher score for amounts deviating from historical average
-    3. Transaction Type Anomaly (20%): Higher score for unusual transaction types
-    4. Velocity Spike (15%): Higher score for rapid transactions after dormancy
+    1. Dormancy Factor: Higher score for longer dormancy periods
+    2. Amount Anomaly: Higher score for amounts deviating from historical average
+    3. Transaction Type Anomaly: Higher score for unusual transaction types
+    4. Velocity Spike: Higher score for rapid transactions after dormancy
+    5. Location Anomaly: Higher score for unusual geographic locations
     
-    Final score is 0-100, where:
+    Weights and thresholds are configurable via config/config.yaml
+    
+    Final score is 0-100, where risk levels are configurable (default):
     - 0-25: LOW risk
     - 26-50: MEDIUM risk
     - 51-75: HIGH risk
     - 76-100: CRITICAL risk
     """
     
-    DORMANCY_THRESHOLD_DAYS = 180
-    VELOCITY_WINDOW_MINUTES = 60  # Check for rapid transactions within this window
-    VELOCITY_THRESHOLD = 3  # Number of transactions in window that triggers concern
-    
     def __init__(
         self, 
         data_store: DataStore, 
         weights: Optional[ScoringWeights] = None,
-        reference_date: Optional[datetime] = None
+        reference_date: Optional[datetime] = None,
+        config: Optional[FraudDetectionConfig] = None
     ):
         """
         Initialize the risk scorer.
         
         Args:
             data_store: The data store with transaction history and profiles
-            weights: Custom scoring weights (uses defaults if not provided)
+            weights: Custom scoring weights (uses config if not provided)
             reference_date: The date to use as "now" for calculations
+            config: Custom configuration (uses global config if not provided)
         """
+        self.config = config or get_config()
         self.data_store = data_store
-        self.weights = weights or ScoringWeights()
+        self.weights = weights or ScoringWeights.from_config(self.config)
         self.reference_date = reference_date or datetime.now()
+        
+        # Load thresholds from config
+        self.dormancy_threshold_days = self.config.dormancy.threshold_days
+        self.velocity_window_minutes = self.config.velocity.window_minutes
+        self.velocity_threshold = self.config.velocity.threshold_count
+        
+        # Load location lists from config
+        self.domestic_locations = set(self.config.locations.domestic)
+        self.international_locations = set(self.config.locations.international)
     
     def calculate_risk(self, transaction: TransactionRequest) -> RiskAssessment:
         """
@@ -199,10 +222,10 @@ class RiskScorer:
         days_dormant = profile.days_since_last_transaction or 0
         
         # Scoring curve: starts at threshold, maxes out at 2 years
-        if days_dormant < self.DORMANCY_THRESHOLD_DAYS:
+        if days_dormant < self.dormancy_threshold_days:
             score = 0.0
         elif days_dormant < 270:  # 180-270 days: moderate risk
-            score = 40.0 + (days_dormant - 180) * 0.33
+            score = 40.0 + (days_dormant - self.dormancy_threshold_days) * 0.33
         elif days_dormant < 365:  # 270-365 days: high risk
             score = 70.0 + (days_dormant - 270) * 0.21
         else:  # 365+ days: very high risk
@@ -337,7 +360,7 @@ class RiskScorer:
         
         # Check for recent transactions in the velocity window
         txn_time = transaction.timestamp or self.reference_date
-        window_start = txn_time - timedelta(minutes=self.VELOCITY_WINDOW_MINUTES)
+        window_start = txn_time - timedelta(minutes=self.velocity_window_minutes)
         
         recent_txns = self.data_store.get_recent_transactions(
             transaction.account_id,
@@ -350,32 +373,18 @@ class RiskScorer:
         if txn_count == 0:
             score = 0.0
             desc = "No rapid-fire transactions detected"
-        elif txn_count < self.VELOCITY_THRESHOLD:
+        elif txn_count < self.velocity_threshold:
             score = txn_count * 15.0
-            desc = f"{txn_count} transactions in last {self.VELOCITY_WINDOW_MINUTES} minutes after dormancy"
+            desc = f"{txn_count} transactions in last {self.velocity_window_minutes} minutes after dormancy"
         else:
-            score = min(100.0, 45.0 + (txn_count - self.VELOCITY_THRESHOLD) * 15)
-            desc = f"Velocity spike: {txn_count} transactions in {self.VELOCITY_WINDOW_MINUTES} minutes after long dormancy"
+            score = min(100.0, 45.0 + (txn_count - self.velocity_threshold) * 15)
+            desc = f"Velocity spike: {txn_count} transactions in {self.velocity_window_minutes} minutes after long dormancy"
         
         return score, RiskFactor(
             factor_name="velocity",
             score_contribution=round(score * self.weights.velocity, 2),
             description=desc
         )
-    
-    # Known international/high-risk locations (outside Southeast Asia domestic region)
-    INTERNATIONAL_LOCATIONS = {
-        "London", "New York", "Dubai", "Tokyo", "Sydney",
-        "Moscow", "Lagos", "Sao Paulo", "Paris", "Berlin",
-        "Toronto", "Mumbai", "Beijing", "Shanghai", "Seoul"
-    }
-    
-    # Southeast Asia domestic region
-    DOMESTIC_LOCATIONS = {
-        "Singapore", "Jakarta", "Bangkok", "Kuala Lumpur", "Manila",
-        "Ho Chi Minh City", "Hanoi", "Bali", "Phuket", "Penang",
-        "Cebu", "Chiang Mai", "Yangon", "Phnom Penh", "Brunei"
-    }
     
     def _calculate_location_anomaly(
         self, location: str | None, profile: AccountProfile
@@ -400,7 +409,7 @@ class RiskScorer:
         
         if profile.total_transactions == 0:
             # No history - check if international location
-            if location in self.INTERNATIONAL_LOCATIONS:
+            if location in self.international_locations:
                 score = 50.0
                 desc = f"International location '{location}' with no account history"
             else:
@@ -414,11 +423,11 @@ class RiskScorer:
         
         # Check if location is in common locations
         is_common = location in common_locations
-        is_international = location in self.INTERNATIONAL_LOCATIONS
-        is_domestic = location in self.DOMESTIC_LOCATIONS
+        is_international = location in self.international_locations
+        is_domestic = location in self.domestic_locations
         
         # Account typically transacts domestically?
-        domestic_count = sum(1 for loc in common_locations if loc in self.DOMESTIC_LOCATIONS)
+        domestic_count = sum(1 for loc in common_locations if loc in self.domestic_locations)
         typically_domestic = domestic_count > len(common_locations) / 2
         
         if is_common:
@@ -461,12 +470,12 @@ class RiskScorer:
         )
     
     def _get_risk_level(self, score: int) -> str:
-        """Convert numeric score to risk level."""
-        if score <= 25:
+        """Convert numeric score to risk level using configured thresholds."""
+        if score <= self.config.risk_levels.low_max:
             return "LOW"
-        elif score <= 50:
+        elif score <= self.config.risk_levels.medium_max:
             return "MEDIUM"
-        elif score <= 75:
+        elif score <= self.config.risk_levels.high_max:
             return "HIGH"
         else:
             return "CRITICAL"
