@@ -90,3 +90,38 @@ class HealthResponse(BaseModel):
     version: str
     accounts_loaded: int
     transactions_loaded: int
+
+
+class BatchTransactionRequest(BaseModel):
+    """Request model for batch risk assessment."""
+    transactions: list[TransactionRequest] = Field(
+        ..., 
+        min_length=1,
+        max_length=1000,
+        description="List of transactions to assess (max 1000)"
+    )
+
+
+class BatchRiskAssessmentResult(BaseModel):
+    """Individual result within a batch assessment."""
+    transaction_index: int
+    assessment: RiskAssessment
+
+
+class BatchRiskAssessmentResponse(BaseModel):
+    """Response model for batch risk assessment."""
+    total_transactions: int
+    processed: int
+    results: list[BatchRiskAssessmentResult]
+    summary: "BatchSummary"
+
+
+class BatchSummary(BaseModel):
+    """Summary statistics for batch assessment."""
+    low_risk_count: int
+    medium_risk_count: int
+    high_risk_count: int
+    critical_risk_count: int
+    average_risk_score: float
+    max_risk_score: int
+    reactivating_accounts: int

@@ -15,7 +15,11 @@ from .models import (
     AccountProfile,
     HealthResponse,
     Transaction,
-    TransactionType
+    TransactionType,
+    BatchTransactionRequest,
+    BatchRiskAssessmentResponse,
+    BatchRiskAssessmentResult,
+    BatchSummary
 )
 from .data_store import data_store
 from .account_profiler import AccountProfiler
@@ -145,6 +149,62 @@ async def assess_transaction_risk(transaction: TransactionRequest):
     
     assessment = scorer.calculate_risk(transaction)
     return assessment
+
+
+@app.post("/api/v1/risk/assess/batch", response_model=BatchRiskAssessmentResponse, tags=["Risk Assessment"])
+async def assess_batch_transactions(batch: BatchTransactionRequest):
+    """
+    Assess risk for multiple transactions in a single request.
+    
+    This endpoint accepts up to 1000 transactions and returns risk assessments
+    for all of them, along with summary statistics.
+    
+    **Use Cases:**
+    - Bulk transaction review
+    - Batch processing of queued transactions
+    - Historical transaction analysis
+    - Periodic risk re-evaluation
+    
+    **Response includes:**
+    - Individual risk assessments for each transaction
+    - Summary with risk level counts and statistics
+    - Count of accounts in REACTIVATING state (high-risk)
+    """
+    if scorer is None:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+    
+    results = []
+    risk_scores = []
+    risk_level_counts = {"LOW": 0, "MEDIUM": 0, "HIGH": 0, "CRITICAL": 0}
+    reactivating_count = 0
+    
+    for idx, transaction in enumerate(batch.transactions):
+        assessment = scorer.calculate_risk(transaction)
+        results.append(BatchRiskAssessmentResult(
+            transaction_index=idx,
+            assessment=assessment
+        ))
+        risk_scores.append(assessment.risk_score)
+        risk_level_counts[assessment.risk_level] += 1
+        if assessment.account_status == "reactivating":
+            reactivating_count += 1
+    
+    summary = BatchSummary(
+        low_risk_count=risk_level_counts["LOW"],
+        medium_risk_count=risk_level_counts["MEDIUM"],
+        high_risk_count=risk_level_counts["HIGH"],
+        critical_risk_count=risk_level_counts["CRITICAL"],
+        average_risk_score=round(sum(risk_scores) / len(risk_scores), 2) if risk_scores else 0.0,
+        max_risk_score=max(risk_scores) if risk_scores else 0,
+        reactivating_accounts=reactivating_count
+    )
+    
+    return BatchRiskAssessmentResponse(
+        total_transactions=len(batch.transactions),
+        processed=len(results),
+        results=results,
+        summary=summary
+    )
 
 
 @app.get("/api/v1/accounts/{account_id}/profile", response_model=AccountProfile, tags=["Accounts"])
