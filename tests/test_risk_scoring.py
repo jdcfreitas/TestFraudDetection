@@ -74,6 +74,42 @@ def sample_transactions(reference_date):
             location="Bangkok"
         ))
     
+    # Edge case: Sparse account with only 2 historical transactions
+    for i in range(2):
+        txn_date = reference_date - timedelta(days=250 + 30 * i)
+        transactions.append(Transaction(
+            transaction_id=f"TXN-SPARSE-{i}",
+            account_id="ACC-SPARSE-001",
+            amount=25.0,
+            transaction_type=TransactionType.ATM_WITHDRAWAL,
+            timestamp=txn_date,
+            location="Manila"
+        ))
+    
+    # Edge case: Recently dormant account - just crossed 180-day threshold (185 days)
+    for i in range(6):
+        txn_date = reference_date - timedelta(days=185 + 20 * i)
+        transactions.append(Transaction(
+            transaction_id=f"TXN-RECENT-DORMANT-{i}",
+            account_id="ACC-RECENT-DORMANT-001",
+            amount=80.0 + (i * 10),
+            transaction_type=TransactionType.ONLINE_PURCHASE,
+            timestamp=txn_date,
+            location="Kuala Lumpur"
+        ))
+    
+    # Edge case: Borderline active account - 179 days since last transaction (just under threshold)
+    for i in range(4):
+        txn_date = reference_date - timedelta(days=179 + 30 * i)
+        transactions.append(Transaction(
+            transaction_id=f"TXN-BORDERLINE-{i}",
+            account_id="ACC-BORDERLINE-001",
+            amount=60.0,
+            transaction_type=TransactionType.BILL_PAYMENT,
+            timestamp=txn_date,
+            location="Ho Chi Minh City"
+        ))
+    
     return transactions
 
 
@@ -102,7 +138,7 @@ class TestDataStore:
         data_store.add_transactions_bulk(sample_transactions)
         
         assert data_store.total_transactions == len(sample_transactions)
-        assert data_store.total_accounts == 3  # Three unique accounts
+        assert data_store.total_accounts == 6  # Six unique accounts (including edge cases)
     
     def test_get_recent_transactions(self, data_store, sample_transactions, reference_date):
         """Test filtering transactions by date range."""
@@ -159,10 +195,13 @@ class TestAccountProfiler:
         
         profiles = profiler.build_all_profiles()
         
-        assert len(profiles) == 3
+        assert len(profiles) == 6  # Including edge case accounts
         assert "ACC-ACTIVE-001" in profiles
         assert "ACC-DORMANT-001" in profiles
         assert "ACC-DIVERSE-001" in profiles
+        assert "ACC-SPARSE-001" in profiles
+        assert "ACC-RECENT-DORMANT-001" in profiles
+        assert "ACC-BORDERLINE-001" in profiles
     
     def test_transaction_type_distribution(self, data_store, sample_transactions, reference_date):
         """Test that transaction type distribution is calculated correctly."""
@@ -460,6 +499,165 @@ class TestRiskScorer:
         # Should have high contribution due to international + dormant combination
         assert location_factor.score_contribution >= 10  # 90 * 0.15 = 13.5
         assert "international" in location_factor.description.lower() or "dormant" in location_factor.description.lower()
+
+
+class TestEdgeCases:
+    """Tests for edge cases and boundary conditions."""
+    
+    def test_sparse_account_minimal_history(self, data_store, sample_transactions, reference_date):
+        """Test accounts with only 1-2 historical transactions."""
+        data_store.add_transactions_bulk(sample_transactions)
+        profiler = AccountProfiler(data_store, reference_date=reference_date)
+        profiler.build_all_profiles()
+        scorer = RiskScorer(data_store, reference_date=reference_date)
+        
+        # ACC-SPARSE-001 has only 2 transactions, both small ATM withdrawals
+        profile = data_store.get_profile("ACC-SPARSE-001")
+        assert profile.total_transactions == 2
+        assert profile.is_dormant  # 250+ days since last transaction
+        
+        # Normal transaction for sparse account
+        normal_txn = TransactionRequest(
+            account_id="ACC-SPARSE-001",
+            amount=30.0,  # Close to historical average of 25
+            transaction_type=TransactionType.ATM_WITHDRAWAL,
+            timestamp=reference_date,
+            location="Manila"
+        )
+        
+        # Anomalous transaction - large wire transfer
+        anomalous_txn = TransactionRequest(
+            account_id="ACC-SPARSE-001",
+            amount=3000.0,  # 120x the historical average
+            transaction_type=TransactionType.WIRE_TRANSFER,  # Never used this type
+            timestamp=reference_date,
+            location="Dubai"  # International location
+        )
+        
+        normal_assessment = scorer.calculate_risk(normal_txn)
+        anomalous_assessment = scorer.calculate_risk(anomalous_txn)
+        
+        # Sparse account should still flag anomalies
+        assert anomalous_assessment.risk_score > normal_assessment.risk_score
+        assert anomalous_assessment.risk_level in ["HIGH", "CRITICAL"]
+        assert anomalous_assessment.account_status == "reactivating"
+    
+    def test_recently_dormant_account(self, data_store, sample_transactions, reference_date):
+        """Test accounts that just crossed the 180-day dormancy threshold."""
+        data_store.add_transactions_bulk(sample_transactions)
+        profiler = AccountProfiler(data_store, reference_date=reference_date)
+        profiler.build_all_profiles()
+        scorer = RiskScorer(data_store, reference_date=reference_date)
+        
+        # ACC-RECENT-DORMANT-001 has 185 days since last transaction (just over threshold)
+        profile = data_store.get_profile("ACC-RECENT-DORMANT-001")
+        assert profile.is_dormant
+        assert 180 <= profile.days_since_last_transaction < 200
+        
+        # Transaction on recently dormant account
+        transaction = TransactionRequest(
+            account_id="ACC-RECENT-DORMANT-001",
+            amount=85.0,  # Within normal range for this account (avg ~105)
+            transaction_type=TransactionType.ONLINE_PURCHASE,
+            timestamp=reference_date,
+            location="Kuala Lumpur"
+        )
+        
+        assessment = scorer.calculate_risk(transaction)
+        
+        # Should be flagged but lower risk than long-dormant accounts
+        assert assessment.is_dormant_account
+        assert assessment.account_status == "reactivating"
+        # Dormancy factor should be moderate (not at max)
+        dormancy_factor = next(f for f in assessment.factors if f.factor_name == "dormancy")
+        assert 10 < dormancy_factor.score_contribution < 25  # Moderate dormancy contribution
+    
+    def test_borderline_active_account(self, data_store, sample_transactions, reference_date):
+        """Test accounts just under the 180-day dormancy threshold (179 days)."""
+        data_store.add_transactions_bulk(sample_transactions)
+        profiler = AccountProfiler(data_store, reference_date=reference_date)
+        profiler.build_all_profiles()
+        scorer = RiskScorer(data_store, reference_date=reference_date)
+        
+        # ACC-BORDERLINE-001 has 179 days since last transaction (just under threshold)
+        profile = data_store.get_profile("ACC-BORDERLINE-001")
+        assert not profile.is_dormant  # Should NOT be dormant
+        assert profile.days_since_last_transaction == 179
+        
+        # Transaction on borderline account
+        transaction = TransactionRequest(
+            account_id="ACC-BORDERLINE-001",
+            amount=60.0,
+            transaction_type=TransactionType.BILL_PAYMENT,
+            timestamp=reference_date,
+            location="Ho Chi Minh City"
+        )
+        
+        assessment = scorer.calculate_risk(transaction)
+        
+        # Should be treated as active, not dormant
+        assert not assessment.is_dormant_account
+        assert assessment.account_status == "active"
+        # Dormancy factor should be zero
+        dormancy_factor = next(f for f in assessment.factors if f.factor_name == "dormancy")
+        assert dormancy_factor.score_contribution == 0.0
+    
+    def test_recently_dormant_vs_long_dormant(self, data_store, sample_transactions, reference_date):
+        """Test that long-dormant accounts score higher than recently dormant."""
+        data_store.add_transactions_bulk(sample_transactions)
+        profiler = AccountProfiler(data_store, reference_date=reference_date)
+        profiler.build_all_profiles()
+        scorer = RiskScorer(data_store, reference_date=reference_date)
+        
+        # Same transaction type and amount for fair comparison
+        recent_dormant_txn = TransactionRequest(
+            account_id="ACC-RECENT-DORMANT-001",  # 185 days dormant
+            amount=500.0,
+            transaction_type=TransactionType.WIRE_TRANSFER,
+            timestamp=reference_date,
+            location="Singapore"
+        )
+        
+        long_dormant_txn = TransactionRequest(
+            account_id="ACC-DORMANT-001",  # 200+ days dormant
+            amount=500.0,
+            transaction_type=TransactionType.WIRE_TRANSFER,
+            timestamp=reference_date,
+            location="Singapore"
+        )
+        
+        recent_assessment = scorer.calculate_risk(recent_dormant_txn)
+        long_assessment = scorer.calculate_risk(long_dormant_txn)
+        
+        # Long-dormant should score higher due to greater dormancy contribution
+        recent_dormancy = next(f for f in recent_assessment.factors if f.factor_name == "dormancy")
+        long_dormancy = next(f for f in long_assessment.factors if f.factor_name == "dormancy")
+        assert long_dormancy.score_contribution > recent_dormancy.score_contribution
+    
+    def test_sparse_account_no_baseline_for_std_dev(self, data_store, sample_transactions, reference_date):
+        """Test that sparse accounts handle missing statistical baseline gracefully."""
+        data_store.add_transactions_bulk(sample_transactions)
+        profiler = AccountProfiler(data_store, reference_date=reference_date)
+        profiler.build_all_profiles()
+        scorer = RiskScorer(data_store, reference_date=reference_date)
+        
+        profile = data_store.get_profile("ACC-SPARSE-001")
+        # With only 2 transactions, std dev should still be calculable
+        assert profile.total_transactions == 2
+        assert profile.std_dev_amount >= 0  # Should not error
+        
+        # Transaction should still be scorable
+        transaction = TransactionRequest(
+            account_id="ACC-SPARSE-001",
+            amount=100.0,
+            transaction_type=TransactionType.ATM_WITHDRAWAL,
+            timestamp=reference_date,
+            location="Manila"
+        )
+        
+        assessment = scorer.calculate_risk(transaction)
+        assert assessment.risk_score >= 0
+        assert assessment.risk_score <= 100
 
 
 class TestIntegration:
